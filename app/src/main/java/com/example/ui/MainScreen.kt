@@ -321,6 +321,34 @@ fun MainScreen(
                         }
                     }
 
+                    // Anti-Freeze Fallback Indicator
+                    if (isConnected && sessionState.isAntiFreezeActive) {
+                        Box(
+                            modifier = Modifier
+                                .padding(top = 6.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ElectricEmerald.copy(alpha = 0.15f))
+                                .border(1.dp, ElectricEmerald.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Security,
+                                    contentDescription = null,
+                                    tint = ElectricEmerald,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "🛡️ Mode Anti-Freeze Aktif: Loading Engine Terlindungi",
+                                    color = ElectricEmerald,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
                     if (sessionState.errorMessage != null) {
                         Text(
                             text = sessionState.errorMessage ?: "",

@@ -1,12 +1,16 @@
 package com.example
 
+import com.example.data.OpenVpnProfiles
 import com.example.data.ServerPresets
 import com.example.model.ConnectionStatus
 import com.example.model.VpnSessionState
 import com.example.vpn.GameVpnService
+import com.example.vpn.packet.IpPacket
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.InetAddress
 
 class ExampleUnitTest {
 
@@ -59,5 +63,56 @@ class ExampleUnitTest {
         assertTrue(state.isSplitTunnelActive)
         assertEquals(0, state.autoDisconnectSeconds)
         assertTrue(state.isFloatingOverlayEnabled)
+        assertEquals(false, state.isAntiFreezeActive)
+    }
+
+    @Test
+    fun testOpenVpnProfiles_cambodiaAndIndiaExist() {
+        val cambodiaProfile = OpenVpnProfiles.PROFILES["Kamboja"]
+        assertNotNull("Profil OpenVPN Kamboja harus tersedia", cambodiaProfile)
+        assertTrue(cambodiaProfile!!.rawOvpnContent.contains("client"))
+        assertTrue(cambodiaProfile.rawOvpnContent.contains("dev tun"))
+
+        val indiaProfile = OpenVpnProfiles.PROFILES["India"]
+        assertNotNull("Profil OpenVPN India harus tersedia", indiaProfile)
+        assertEquals(1194, indiaProfile!!.remotePort)
+    }
+
+    @Test
+    fun testOpenVpnProfiles_parser() {
+        val sampleOvpn = """
+            client
+            dev tun
+            proto udp
+            remote my-vpn.gaming.com 443
+            cipher AES-256-GCM
+        """.trimIndent()
+
+        val parsed = OpenVpnProfiles.parseOvpn(sampleOvpn, "TestServer")
+        assertEquals("my-vpn.gaming.com", parsed.remoteHost)
+        assertEquals(443, parsed.remotePort)
+        assertEquals("udp", parsed.protocol)
+    }
+
+    @Test
+    fun testIpPacket_buildUdpReply() {
+        val src = InetAddress.getByName("1.1.1.1")
+        val dst = InetAddress.getByName("10.8.0.2")
+        val payload = "DNS_PONG".toByteArray()
+
+        val replyBytes = IpPacket.buildUdpReplyPacket(
+            srcIp = src,
+            dstIp = dst,
+            srcPort = 53,
+            dstPort = 45678,
+            payload = payload
+        )
+
+        assertTrue(replyBytes.size >= 28 + payload.size)
+        val parsed = IpPacket.parse(replyBytes, replyBytes.size)
+        assertNotNull(parsed)
+        assertEquals(IpPacket.PROTOCOL_UDP, parsed!!.protocol)
+        assertEquals(53, parsed.sourcePort)
+        assertEquals(45678, parsed.destPort)
     }
 }

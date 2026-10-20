@@ -21,5 +21,7 @@ data class VpnSessionState(
     val autoDisconnectSeconds: Int = 0, // 0 = disabled, 60, 90, 120
     val autoDisconnectRemainingSeconds: Int? = null,
     val isFloatingOverlayEnabled: Boolean = true,
+    val isAntiFreezeActive: Boolean = false,
+    val antiFreezeMessage: String? = null,
     val errorMessage: String? = null
 )

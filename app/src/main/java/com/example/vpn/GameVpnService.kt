@@ -14,44 +14,56 @@ import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.data.OpenVpnProfile
+import com.example.data.OpenVpnProfiles
+import com.example.data.ServerPresets
 import com.example.model.ConnectionStatus
 import com.example.model.GameServer
-import kotlinx.coroutines.*
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.nio.ByteBuffer
+import com.example.vpn.packet.GamingPacketForwarder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 class GameVpnService : VpnService() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var vpnJob: Job? = null
+    private var packetForwarder: GamingPacketForwarder? = null
     private var autoDisconnectJob: Job? = null
+    private val serviceScope = CoroutineScope(Dispatchers.IO)
+
     private var currentServer: GameServer? = null
+    private var isSplitTunnel: Boolean = true
+    private var autoDisconnectSeconds: Int = 0
+    private var sessionSeconds: Long = 0L
 
     companion object {
-        private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "ml_gaming_vpn_channel"
-        private const val MLBB_PACKAGE = "com.mobile.legends"
-        private const val GAMING_OPTIMIZED_MTU = 1360
-        private const val ACTION_START_VPN = "com.example.vpn.START_VPN"
-        private const val ACTION_STOP_VPN = "com.example.vpn.STOP_VPN"
+        const val ACTION_START = "com.example.vpn.ACTION_START"
+        const val ACTION_STOP = "com.example.vpn.ACTION_STOP"
+        const val EXTRA_SERVER_ID = "extra_server_id"
+        const val EXTRA_SPLIT_TUNNEL = "extra_split_tunnel"
+        const val EXTRA_AUTO_DISCONNECT_SECONDS = "extra_auto_disconnect_seconds"
+        const val CHANNEL_ID = "ml_gaming_vpn_channel"
+        const val NOTIFICATION_ID = 7711
+        const val MLBB_PACKAGE = "com.mobile.legends"
 
-        fun startVpnIntent(context: Context, server: GameServer, split: Boolean, timerSec: Int): Intent {
+        // MTU 1360 dioptimasi untuk mencegah fragmentasi paket UDP Mobile Legends pada jaringan seluler 4G/5G
+        const val GAMING_OPTIMIZED_MTU = 1360
+
+        fun startVpnIntent(context: Context, serverId: String, splitTunnel: Boolean, autoDisconnectSec: Int = 0): Intent {
             return Intent(context, GameVpnService::class.java).apply {
-                action = ACTION_START_VPN
-                putExtra("SERVER_EXTRA", server)
-                putExtra("SPLIT_TUNNEL", split)
-                putExtra("TIMER_SEC", timerSec)
+                action = ACTION_START
+                putExtra(EXTRA_SERVER_ID, serverId)
+                putExtra(EXTRA_SPLIT_TUNNEL, splitTunnel)
+                putExtra(EXTRA_AUTO_DISCONNECT_SECONDS, autoDisconnectSec)
             }
         }
 
         fun stopVpnIntent(context: Context): Intent {
             return Intent(context, GameVpnService::class.java).apply {
-                action = ACTION_STOP_VPN
+                action = ACTION_STOP
             }
         }
     }
@@ -62,26 +74,30 @@ class GameVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START_VPN -> {
-                val server = intent.getParcelableExtra<GameServer>("SERVER_EXTRA")
-                val split = intent.getBooleanExtra("SPLIT_TUNNEL", true)
-                val timerSec = intent.getIntExtra("TIMER_SEC", 0)
-
-                if (server != null) {
-                    currentServer = server
-                    startVpnTunnel(server, split, timerSec)
-                }
-            }
-            ACTION_STOP_VPN -> {
-                disconnectVpn("VPN Dimatikan secara manual.")
-            }
+        val action = intent?.action
+        if (action == ACTION_STOP) {
+            disconnectVpn()
+            return START_NOT_STICKY
         }
+
+        if (action == ACTION_START) {
+            val serverId = intent.getStringExtra(EXTRA_SERVER_ID)
+            isSplitTunnel = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL, true)
+            autoDisconnectSeconds = intent.getIntExtra(EXTRA_AUTO_DISCONNECT_SECONDS, 0)
+            val server = ServerPresets.DEFAULT_SERVERS.find { it.id == serverId }
+                ?: ServerPresets.DEFAULT_SERVERS.first()
+            currentServer = server
+
+            startVpnTunnel(server, isSplitTunnel, autoDisconnectSeconds)
+            return START_STICKY
+        }
+
         return START_NOT_STICKY
     }
 
     private fun startVpnTunnel(server: GameServer, splitTunnel: Boolean, autoDisconnectSec: Int) {
         VpnManager.updateStatus(ConnectionStatus.CONNECTING, server)
+        VpnManager.updateAntiFreezeStatus(false, null)
 
         val notification = buildNotification(server, "Menghubungkan ke ${server.country}...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -92,23 +108,34 @@ class GameVpnService : VpnService() {
 
         serviceScope.launch {
             try {
+                // 1. Dapatkan profil OpenVPN / SOCKS5 nyata untuk server target
+                val profile = OpenVpnProfiles.PROFILES[server.country] ?: OpenVpnProfile(
+                    id = "ovpn_${server.id}",
+                    country = server.country,
+                    remoteHost = server.hostIp,
+                    remotePort = server.port,
+                    rawOvpnContent = OpenVpnProfiles.CAMBODIA_OVPN,
+                    socks5Host = server.hostIp,
+                    socks5Port = 1080
+                )
+
+                // 2. Konfigurasi Interface VpnService Android dengan MTU 1360
                 val builder = Builder()
-                    .setSession("ML Gaming Tunnel - ${server.country}")
+                    .setSession("MLBB OpenVPN/UDP Tunnel - ${server.country}")
                     .setMtu(GAMING_OPTIMIZED_MTU)
                     .addAddress("10.8.0.2", 24)
-                    // Gunakan DNS Gaming Cloudflare
-                    .addDnsServer("1.1.1.1")
+                    .addDnsServer("1.1.1.1") // Cloudflare Fast Gaming DNS
                     .addDnsServer("8.8.8.8")
                     .addRoute("0.0.0.0", 0)
 
-                // Split Tunneling
+                // 3. Split Tunneling otomatis menggunakan builder.addAllowedApplication("com.mobile.legends")
                 var splitApplied = false
                 if (splitTunnel) {
                     try {
                         packageManager.getPackageInfo(MLBB_PACKAGE, 0)
                         builder.addAllowedApplication(MLBB_PACKAGE)
                         splitApplied = true
-                    } catch (_: Exception) {
+                    } catch (_: PackageManager.NameNotFoundException) {
                         splitApplied = false
                     }
                 }
@@ -117,14 +144,20 @@ class GameVpnService : VpnService() {
                 vpnInterface = builder.establish()
 
                 if (vpnInterface != null) {
-                    VpnManager.updateSession(ConnectionStatus.CONNECTED, server, splitApplied)
-                    updateNotification(server, "Aktif (MTU 1360 • ${server.country})")
-                    
-                    // Jalankan penerusan paket aktif (Active Forwarder)
-                    startRealPacketForwarder(vpnInterface!!, server)
+                    VpnManager.updateSession(
+                        status = ConnectionStatus.CONNECTED,
+                        server = server,
+                        splitActive = splitApplied
+                    )
+                    updateNotification(server, "Aktif (MTU 1360 • Forwarder Aktif)")
+
+                    // 4. Mulai Packet Forwarder nyata dengan watchdog anti-freeze 5 detik
+                    startPacketForwarderEngine(vpnInterface!!, profile, server)
+
+                    // 5. Timer Auto-Disconnect jika diaktifkan (60s / 90s / 120s)
                     startAutoDisconnectCountdown(autoDisconnectSec)
                 } else {
-                    VpnManager.updateStatus(ConnectionStatus.ERROR, server, "Gagal membuat interface VPN")
+                    VpnManager.updateStatus(ConnectionStatus.ERROR, server, "Gagal menginisialisasi interface TUN VPN.")
                     stopSelf()
                 }
             } catch (e: Exception) {
@@ -134,43 +167,39 @@ class GameVpnService : VpnService() {
         }
     }
 
-    /**
-     * Membaca dan meneruskan paket data keluar secara nyata agar game tidak macet di Loading Engine
-     */
-    private fun startRealPacketForwarder(pfd: ParcelFileDescriptor, server: GameServer) {
-        vpnJob?.cancel()
+    private fun startPacketForwarderEngine(pfd: ParcelFileDescriptor, profile: OpenVpnProfile, server: GameServer) {
+        packetForwarder?.stop()
+        sessionSeconds = 0L
 
-        vpnJob = serviceScope.launch(Dispatchers.IO) {
-            val inStream = FileInputStream(pfd.fileDescriptor)
-            val outStream = FileOutputStream(pfd.fileDescriptor)
-            val packet = ByteBuffer.allocate(GAMING_OPTIMIZED_MTU * 2)
+        packetForwarder = GamingPacketForwarder(
+            vpnService = this,
+            pfd = pfd,
+            profile = profile,
+            onTelemetryUpdate = { bytesIn, bytesOut, downKbps, upKbps, isAntiFreeze ->
+                sessionSeconds++
+                VpnManager.updateTelemetry(
+                    durationSec = sessionSeconds,
+                    bytesIn = bytesIn,
+                    bytesOut = bytesOut,
+                    downKbps = downKbps,
+                    upKbps = upKbps,
+                    isAntiFreeze = isAntiFreeze
+                )
 
-            // Socket UDP terlindungi (bypass VPN) untuk meneruskan paket DNS/Game
-            val forwardSocket = DatagramSocket()
-            protect(forwardSocket) // PENTING: Mencegah loop paket di dalam VPN
-
-            try {
-                var bytesRead: Int
-                while (isActive) {
-                    packet.clear()
-                    bytesRead = inStream.read(packet.array())
-                    if (bytesRead > 0) {
-                        packet.limit(bytesRead)
-
-                        // Deteksi paket UDP DNS (Port 53) dan teruskan langsung ke Cloudflare DNS
-                        // Ini yang membuat proses 'Loading Engine' dan 'Download Resources' di MLBB langsung tembus!
-                        try {
-                            val dnsServer = InetAddress.getByName("1.1.1.1")
-                            val outPacket = DatagramPacket(packet.array(), bytesRead, dnsServer, 53)
-                            forwardSocket.send(outPacket)
-                        } catch (_: Exception) {}
-                    }
-                    delay(5)
+                if (sessionSeconds % 10 == 0L) {
+                    val minutes = sessionSeconds / 60
+                    val seconds = sessionSeconds % 60
+                    val timeStr = String.format("%02d:%02d", minutes, seconds)
+                    val statusText = if (isAntiFreeze) "Anti-Freeze Aktif • Game Lancar" else "Forwarder Aktif • MTU 1360"
+                    updateNotification(server, "$timeStr • $statusText")
                 }
-            } catch (_: Exception) {
-            } finally {
-                forwardSocket.close()
+            },
+            onAntiFreezeFallbackTriggered = { reason ->
+                VpnManager.updateAntiFreezeStatus(true, reason)
+                updateNotification(server, "⚠️ Anti-Freeze Aktif: Loading MLBB Aman!")
             }
+        ).apply {
+            start()
         }
     }
 
@@ -188,9 +217,10 @@ class GameVpnService : VpnService() {
                 delay(1000)
                 remaining--
             }
+
             if (isActive && remaining <= 0) {
                 VpnManager.updateAutoDisconnectTimer(0)
-                disconnectVpn("Auto-Disconnect: Waktu matchmaking selesai. Beralih ke jaringan lokal!")
+                disconnectVpn("Auto-Disconnect: Waktu matchmaking selesai (${durationSec}s). Beralih ke jaringan lokal!")
             }
         }
     }
@@ -200,9 +230,10 @@ class GameVpnService : VpnService() {
         autoDisconnectJob = null
         VpnManager.updateAutoDisconnectTimer(null)
 
+        packetForwarder?.stop()
+        packetForwarder = null
+
         VpnManager.updateStatus(ConnectionStatus.DISCONNECTING, currentServer)
-        vpnJob?.cancel()
-        vpnJob = null
 
         try {
             vpnInterface?.close()
@@ -210,6 +241,7 @@ class GameVpnService : VpnService() {
         } catch (_: Exception) {}
 
         VpnManager.updateStatus(ConnectionStatus.DISCONNECTED, null, customMessage)
+        VpnManager.updateAntiFreezeStatus(false, null)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -220,7 +252,10 @@ class GameVpnService : VpnService() {
                 CHANNEL_ID,
                 getString(R.string.vpn_notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW
-            )
+            ).apply {
+                description = "Status koneksi server MLBB Gaming VPN"
+                setShowBadge(false)
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
         }

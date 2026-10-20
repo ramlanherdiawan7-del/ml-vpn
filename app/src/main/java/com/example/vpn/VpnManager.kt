@@ -133,12 +133,22 @@ object VpnManager {
         }
     }
 
+    fun updateAntiFreezeStatus(isActive: Boolean, message: String? = null) {
+        _sessionState.update {
+            it.copy(
+                isAntiFreezeActive = isActive,
+                antiFreezeMessage = message
+            )
+        }
+    }
+
     fun updateTelemetry(
         durationSec: Long,
         bytesIn: Long,
         bytesOut: Long,
         downKbps: Double,
-        upKbps: Double
+        upKbps: Double,
+        isAntiFreeze: Boolean = false
     ) {
         _sessionState.update {
             it.copy(
@@ -146,7 +156,8 @@ object VpnManager {
                 bytesIn = bytesIn,
                 bytesOut = bytesOut,
                 currentDownloadSpeedKbps = downKbps,
-                currentUploadSpeedKbps = upKbps
+                currentUploadSpeedKbps = upKbps,
+                isAntiFreezeActive = isAntiFreeze || it.isAntiFreezeActive
             )
         }
     }
