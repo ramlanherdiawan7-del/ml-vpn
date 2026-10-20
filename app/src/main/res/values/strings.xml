@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">ML Server VPN</string>
+    <string name="vpn_service_title">ML Server Switcher VPN Active</string>
+    <string name="vpn_service_description">Optimizing matchmaking latency for Mobile Legends</string>
+    <string name="vpn_notification_channel_name">Gaming VPN Service</string>
+    <string name="vpn_disconnect">Disconnect</string>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "ML Server Switcher VPN",
+  "description": "A high-performance gaming VPN designed for Mobile Legends to switch matchmaking server regions, optimize ping, and route MLBB traffic.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
